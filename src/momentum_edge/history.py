@@ -8,9 +8,10 @@ from typing import Any
 
 from .formatting import signal_to_record
 from .rules import Signal, SignalEvaluator
+from .storage import runtime_data_dir
 
 
-DEFAULT_HISTORY_PATH = Path("data") / "alert_history.json"
+DEFAULT_HISTORY_PATH = runtime_data_dir() / "alert_history.json"
 
 
 def backup_corrupt_history(path: Path) -> Path:

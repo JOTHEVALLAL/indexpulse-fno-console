@@ -10,9 +10,10 @@ from typing import Any
 from .live_snapshot import LiveInstrumentSnapshot
 from .rules import SignalEvaluator
 from .scanner_state import DataMode, FreshnessState
+from .storage import runtime_data_dir
 
 
-DEFAULT_DIAGNOSTIC_PATH = Path("data") / "market_diagnostics.csv"
+DEFAULT_DIAGNOSTIC_PATH = runtime_data_dir() / "market_diagnostics.csv"
 
 
 DIAGNOSTIC_COLUMNS = [

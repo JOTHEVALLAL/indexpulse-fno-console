@@ -13,9 +13,10 @@ from typing import Any, Iterable
 from .candle_utils import ensure_ist
 from .rules import Direction, Signal, SignalEvaluator, SignalStatus
 from .scanner_state import DataMode, FreshnessState, freshness_state
+from .storage import runtime_data_dir
 
 
-DEFAULT_OPTION_RECOMMENDATION_PATH = Path("data") / "option_recommendations.json"
+DEFAULT_OPTION_RECOMMENDATION_PATH = runtime_data_dir() / "option_recommendations.json"
 
 
 class OptionSide(str, Enum):

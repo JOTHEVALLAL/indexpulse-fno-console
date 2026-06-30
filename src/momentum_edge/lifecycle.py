@@ -12,9 +12,10 @@ from .confidence import confidence_breakdown, confidence_to_record
 from .live_snapshot import LiveInstrumentSnapshot
 from .rules import Direction, Signal, SignalEvaluator, SignalStatus, SetupName
 from .scanner_state import DataMode, FreshnessState
+from .storage import runtime_data_dir
 
 
-DEFAULT_LIFECYCLE_PATH = Path("data") / "signal_lifecycle.json"
+DEFAULT_LIFECYCLE_PATH = runtime_data_dir() / "signal_lifecycle.json"
 ACTIONABLE = {SignalStatus.PREPARE, SignalStatus.READY}
 
 

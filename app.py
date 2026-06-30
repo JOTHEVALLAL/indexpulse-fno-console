@@ -15,7 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 import streamlit as st
 
 from momentum_edge.alerts import format_telegram_alert
-from momentum_edge.config import kite_configuration_status, load_runtime_config, package_import_status
+from momentum_edge.config import kite_configuration_status, load_runtime_config, package_import_status, telegram_configuration_status
 from momentum_edge.diagnostics import DEFAULT_DIAGNOSTIC_PATH, load_diagnostic_records
 from momentum_edge.formatting import format_price, signal_detail
 from momentum_edge.history import DEFAULT_HISTORY_PATH, append_alert, clear_alert_history, load_alert_history
@@ -53,7 +53,7 @@ from momentum_edge.performance import breakdown, filter_outcome_records, perform
 from momentum_edge.rules import Signal, SignalStatus
 from momentum_edge.scanner_state import DataMode, FreshnessState, ScannerCache, ScannerDiagnostics, ScannerState
 from momentum_edge.sample_data import SampleScenario, evaluate_sample_scenarios
-from momentum_edge.storage import ensure_data_directory
+from momentum_edge.storage import PERSISTENCE_MODE, ensure_data_directory, persistence_file_status, runtime_data_dir
 from momentum_edge.trades import TradeStatus, add_active_trade, trade_to_row, update_trade_status
 from momentum_edge.ui_models import STATUS_ICON, filtered_signals, signal_to_display_row
 from momentum_edge.version import APP_VERSION
@@ -78,26 +78,33 @@ def initialize_state() -> None:
 
 def render_deployment_diagnostics(data_mode: DataMode) -> None:
     runtime_config = load_runtime_config()
-    data_status = ensure_data_directory()
+    data_dir = runtime_data_dir(runtime_config)
+    data_status = ensure_data_directory(data_dir)
     kite_status = kite_configuration_status(runtime_config)
+    telegram_status = telegram_configuration_status(runtime_config)
     st.sidebar.caption(f"Version: {APP_VERSION}")
     st.sidebar.caption(f"Deployment: {runtime_config.deployment_mode.value}")
     st.sidebar.caption(f"Data mode: {data_mode.value}")
+    st.sidebar.caption(f"Persistence: {PERSISTENCE_MODE}")
     st.sidebar.warning("Cloud filesystem persistence is temporary until external storage is configured.")
     with st.sidebar.expander("Deployment Diagnostics"):
         st.write(
             {
                 "application_version": APP_VERSION,
                 "deployment_mode": runtime_config.deployment_mode.value,
+                "app_env": runtime_config.app_env or "-",
                 "data_mode": data_mode.value,
                 "python_streamlit_imports": package_import_status(),
+                "persistence_mode": PERSISTENCE_MODE,
                 "data_directory": {
                     "path": str(data_status.path),
                     "exists": data_status.exists,
                     "writable": data_status.writable,
                     "error": data_status.error,
                 },
+                "persistence_files": persistence_file_status(data_dir),
                 "kite_configuration": kite_status,
+                "telegram_configuration": telegram_status,
             }
         )
 
@@ -776,12 +783,22 @@ def main() -> None:
     if selected_data_mode == DataMode.SAMPLE:
         scenarios_and_signals, diagnostics = sample_scenarios_with_diagnostics(st.session_state.last_refresh_time)
     else:
-        try:
-            kite_client = KiteClient()
-            live_snapshot = scan_live(kite_client, st.session_state.last_refresh_time, st.session_state.scanner_cache)
-        except KiteAuthenticationError as exc:
+        runtime_config = load_runtime_config()
+        kite_status = kite_configuration_status(runtime_config)
+        if not kite_status["configured"]:
             live_snapshot = None
-            diagnostics = unavailable_diagnostics(str(exc), st.session_state.last_refresh_time, st.session_state.scanner_cache)
+            diagnostics = unavailable_diagnostics(
+                "LIVE mode unavailable: Kite API key, API secret, and access token must be configured.",
+                st.session_state.last_refresh_time,
+                st.session_state.scanner_cache,
+            )
+        else:
+            try:
+                kite_client = KiteClient()
+                live_snapshot = scan_live(kite_client, st.session_state.last_refresh_time, st.session_state.scanner_cache)
+            except KiteAuthenticationError as exc:
+                live_snapshot = None
+                diagnostics = unavailable_diagnostics(str(exc), st.session_state.last_refresh_time, st.session_state.scanner_cache)
         if live_snapshot is not None:
             diagnostics = live_snapshot.diagnostics
             live_items = live_snapshot.instruments

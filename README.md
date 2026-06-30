@@ -7,9 +7,9 @@ Independent Phase 1 console and rule engine for generating intraday index-based 
 
 Signals are generated from the underlying index only. Option side suggestions are derived after a spot signal is actionable; the engine never places orders.
 
-The Streamlit app supports SAMPLE mode and a Phase 2A LIVE underlying-data mode. It does not fetch live option chains, send Telegram messages, or place orders.
+The Streamlit app supports SAMPLE mode, LIVE underlying-data scanning, and read-only option-contract recommendations. It does not send Telegram messages or place orders.
 
-Cloud preview version: `0.3.0-cloud-preview`
+Cloud preview version: `0.4.0-cloud-preview`
 
 Recommended Python version: `3.11`
 
@@ -41,10 +41,11 @@ LIVE mode reads credentials from environment variables:
 
 ```powershell
 $env:KITE_API_KEY='your_api_key'
+$env:KITE_API_SECRET='your_api_secret'
 $env:KITE_ACCESS_TOKEN='your_access_token'
 ```
 
-If authentication, instrument resolution, or candle retrieval fails, the console shows the LIVE error. It does not replace LIVE rows with SAMPLE rows. If a previous valid live snapshot exists, the console can show it as `LIVE CACHED` with actions disabled. Live mode does not select option contracts, send Telegram alerts, or place orders.
+If authentication, instrument resolution, or candle retrieval fails, the console shows the LIVE error. It does not replace LIVE rows with SAMPLE rows. If a previous valid live snapshot exists, the console can show it as `LIVE CACHED` with actions disabled. Live mode requires Kite API key, API secret, and access token to be configured before scanner calls are attempted. Live mode can create read-only option recommendations for LIVE READY signals, but it does not send Telegram alerts or place orders.
 
 Streamlit Community Cloud can read the same keys from app secrets:
 
@@ -55,6 +56,8 @@ KITE_ACCESS_TOKEN = "..."
 KITE_REDIRECT_URL = "..."
 TELEGRAM_BOT_TOKEN = ""
 TELEGRAM_CHAT_IDS = ""
+APP_ENV = "streamlit_cloud"
+DATA_DIR = "data"
 ```
 
 Telegram keys are reserved for future phases and are not required.
@@ -74,9 +77,9 @@ MOMENTUM_EDGE_DEPLOYMENT_MODE=STREAMLIT_CLOUD
 
 Initial hosted validation should use SAMPLE mode. LIVE mode remains unavailable until valid Kite configuration and daily access-token handling are provided.
 
-The sidebar includes Deployment Diagnostics with application version, deployment mode, Python/Streamlit import status, writable data-directory status, Kite configuration status, and current data mode. Secret values are never displayed.
+The sidebar includes Deployment Diagnostics with application version, deployment mode, data mode, Python/Streamlit import status, writable data-directory status, local persistence file status, Kite configuration status, and Telegram configuration status. Secret values are never displayed.
 
-Local Streamlit Community Cloud filesystem persistence is temporary and should not be treated as durable storage. CSV downloads remain available.
+Local Streamlit Community Cloud filesystem persistence is temporary and should not be treated as durable storage. The diagnostics label this persistence mode as `TEMPORARY LOCAL FILES`. CSV downloads remain available.
 
 ## Live Data Foundation
 
@@ -231,7 +234,7 @@ Do not push over the existing Momentum Edge equity repository.
 Expected initial cloud behavior:
 
 - App starts in SAMPLE mode.
-- LIVE mode does not run without Kite credentials.
+- LIVE mode does not run without complete Kite credentials.
 - No Telegram messages are sent.
 - No orders are placed.
 

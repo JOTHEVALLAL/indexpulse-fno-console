@@ -11,9 +11,10 @@ from typing import Any
 
 from .rules import Candle, Direction, Signal, SignalEvaluator, SignalStatus
 from .scanner_state import DataMode
+from .storage import runtime_data_dir
 
 
-DEFAULT_OUTCOME_PATH = Path("data") / "signal_outcomes.json"
+DEFAULT_OUTCOME_PATH = runtime_data_dir() / "signal_outcomes.json"
 
 
 class ExecutionState(str, Enum):
