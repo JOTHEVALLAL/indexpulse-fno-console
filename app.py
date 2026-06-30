@@ -435,7 +435,16 @@ def render_intraday_setups(
         render_signal_actions(selected_signal, actions_enabled, disabled_reason)
     with right:
         st.subheader("Telegram Preview")
-        st.code(format_telegram_alert(selected_signal), language="text")
+        preview_actionable = data_mode == DataMode.SAMPLE or (diagnostics.signals_actionable if diagnostics else False)
+        st.code(
+            format_telegram_alert(
+                selected_signal,
+                data_mode=data_mode,
+                actionable=preview_actionable,
+                block_reason=disabled_reason,
+            ),
+            language="text",
+        )
 
     if st.session_state.watchlist:
         st.subheader("Watchlist")

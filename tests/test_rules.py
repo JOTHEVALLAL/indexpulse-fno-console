@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from momentum_edge.alerts import format_telegram_alert
+import momentum_edge.alerts as alerts_module
 from momentum_edge.history import append_alert, load_alert_history, save_alert_history
 from momentum_edge.rules import (
     Candle,
@@ -15,6 +16,7 @@ from momentum_edge.rules import (
     SetupName,
 )
 from momentum_edge.sample_data import evaluate_sample_scenarios
+from momentum_edge.scanner_state import DataMode
 from momentum_edge.trades import add_active_trade, create_active_trade
 from momentum_edge.watchlist import add_watchlist_entry, create_watchlist_entry
 
@@ -155,10 +157,42 @@ class SignalEvaluatorTest(unittest.TestCase):
 
         preview = format_telegram_alert(signal)
 
+        self.assertIn("IndexPulse F&O Console — SAMPLE DATA", preview)
         self.assertIn("SAMPLE DATA", preview)
         self.assertIn("Preview only", preview)
         self.assertIn("No order placed", preview)
         self.assertIn("Opening Range Breakout", preview)
+
+    def test_live_actionable_telegram_preview_uses_live_data_header(self) -> None:
+        signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+
+        preview = format_telegram_alert(signal, data_mode=DataMode.LIVE, actionable=True)
+
+        self.assertIn("IndexPulse F&O Console — LIVE DATA", preview)
+        self.assertNotIn("LIVE PREVIEW", preview)
+        self.assertNotIn("Reference only", preview)
+
+    def test_live_blocked_telegram_preview_uses_live_preview_header_and_reason(self) -> None:
+        signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+
+        preview = format_telegram_alert(
+            signal,
+            data_mode=DataMode.LIVE,
+            actionable=False,
+            block_reason="Blocked: live candle feed is delayed",
+        )
+
+        self.assertIn("IndexPulse F&O Console — LIVE PREVIEW", preview)
+        self.assertIn("Reference only — not actionable", preview)
+        self.assertIn("Blocked: live candle feed is delayed", preview)
+
+    def test_telegram_preview_formatting_does_not_dispatch(self) -> None:
+        signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+
+        preview = format_telegram_alert(signal, data_mode=DataMode.LIVE, actionable=True)
+
+        self.assertIn("No Telegram message sent", preview)
+        self.assertFalse(hasattr(alerts_module, "send_telegram_alert"))
 
     def test_alert_history_handles_missing_empty_and_append(self) -> None:
         signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
