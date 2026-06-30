@@ -11,9 +11,17 @@ from momentum_edge.candle_utils import IST, completed_candles, ensure_ist
 from momentum_edge.diagnostics import append_diagnostic_record, diagnostic_key, load_diagnostic_records
 from momentum_edge.indicators import atr, ema, opening_range, previous_day_levels, relative_volume, session_vwap
 from momentum_edge.instruments import resolve_nearest_monthly_future
-from momentum_edge.kite_client import KiteAuthenticationError, KiteCredentials, KiteDataError
-from momentum_edge.live_scanner import block_ready_when_stale, scan_live
-from momentum_edge.market_data import RawFuturesData, RawInstrumentData, build_market_context, build_market_context_with_futures
+from momentum_edge.kite_client import KiteAuthenticationError, KiteClient, KiteCredentials, KiteDataError, KiteValidationError
+from momentum_edge.live_scanner import block_ready_when_stale, load_previous_candle_session, scan_live
+from momentum_edge.market_data import (
+    HistoricalRangeError,
+    RawFuturesData,
+    RawInstrumentData,
+    build_market_context,
+    build_market_context_with_futures,
+    historical_range_plan,
+    validate_historical_range,
+)
 from momentum_edge.rules import Candle, Direction, IndicatorSnapshot, MarketContext, Signal, SignalStatus, SetupName
 from momentum_edge.sample_data import evaluate_sample_scenarios
 from momentum_edge.scanner_state import DataMode, FreshnessState, ScannerCache, ScannerState
@@ -93,6 +101,28 @@ class FakeKiteClient:
         return previous_day()
 
 
+class CountingHistoricalApi:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def historical_data(self, instrument_token: int, from_date: datetime, to_date: datetime, interval: str) -> list[dict]:
+        self.calls += 1
+        return []
+
+
+class PreviousDayFallbackClient:
+    def __init__(self) -> None:
+        self.day_calls: list[tuple[datetime, datetime]] = []
+
+    def historical_candles(self, instrument_token: int, from_date: datetime, to_date: datetime, interval: str) -> list[Candle]:
+        if interval != "day":
+            return []
+        self.day_calls.append((from_date, to_date))
+        if len(self.day_calls) == 1:
+            raise KiteDataError("holiday or empty session")
+        return previous_day()
+
+
 def spot_catalog() -> list[dict]:
     return [
         {"exchange": "NSE", "tradingsymbol": "NIFTY 50", "instrument_token": 1},
@@ -131,6 +161,103 @@ def futures_catalog() -> list[dict]:
 
 
 class LiveDataTest(unittest.TestCase):
+    def test_before_market_request_uses_previous_trading_session(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 8, 45, tzinfo=IST))
+
+        self.assertEqual(plan.selected_session.isoformat(), "2026-06-29")
+        self.assertEqual(plan.range_5m.from_dt, datetime(2026, 6, 29, 9, 15, tzinfo=IST))
+        self.assertEqual(plan.range_5m.to_dt, datetime(2026, 6, 29, 15, 30, tzinfo=IST))
+
+    def test_during_market_request_uses_current_session_after_completed_candle(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 10, 2, tzinfo=IST))
+
+        self.assertEqual(plan.selected_session.isoformat(), "2026-06-30")
+        self.assertEqual(plan.range_5m.to_dt, datetime(2026, 6, 30, 10, 0, tzinfo=IST))
+
+    def test_after_market_request_caps_at_session_close(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 16, 5, tzinfo=IST))
+
+        self.assertEqual(plan.selected_session.isoformat(), "2026-06-30")
+        self.assertEqual(plan.range_5m.to_dt, datetime(2026, 6, 30, 15, 30, tzinfo=IST))
+
+    def test_weekend_request_uses_previous_weekday(self) -> None:
+        plan = historical_range_plan(datetime(2026, 7, 4, 11, 0, tzinfo=IST))
+
+        self.assertEqual(plan.selected_session.isoformat(), "2026-07-03")
+
+    def test_from_dt_equal_to_dt_is_invalid(self) -> None:
+        value = datetime(2026, 6, 30, 9, 15, tzinfo=IST)
+
+        with self.assertRaises(HistoricalRangeError):
+            validate_historical_range(value, value, "5minute")
+
+    def test_from_dt_after_to_dt_is_invalid(self) -> None:
+        with self.assertRaises(HistoricalRangeError):
+            validate_historical_range(datetime(2026, 6, 30, 9, 20, tzinfo=IST), datetime(2026, 6, 30, 9, 15, tzinfo=IST), "5minute")
+
+    def test_completed_5_minute_candle_cutoff(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 10, 4, 59, tzinfo=IST))
+
+        self.assertEqual(plan.range_5m.to_dt, datetime(2026, 6, 30, 10, 0, tzinfo=IST))
+
+    def test_completed_15_minute_candle_cutoff(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 10, 14, 59, tzinfo=IST))
+
+        self.assertEqual(plan.range_15m.to_dt, datetime(2026, 6, 30, 10, 0, tzinfo=IST))
+
+    def test_early_session_15_minute_range_falls_back_to_previous_session(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 9, 25, tzinfo=IST))
+
+        self.assertEqual(plan.range_5m.from_dt, datetime(2026, 6, 30, 9, 15, tzinfo=IST))
+        self.assertEqual(plan.range_5m.to_dt, datetime(2026, 6, 30, 9, 25, tzinfo=IST))
+        self.assertEqual(plan.range_15m.from_dt, datetime(2026, 6, 29, 9, 15, tzinfo=IST))
+        self.assertEqual(plan.range_15m.to_dt, datetime(2026, 6, 29, 15, 30, tzinfo=IST))
+
+    def test_previous_trading_day_fallback_skips_empty_session(self) -> None:
+        plan = historical_range_plan(datetime(2026, 6, 30, 10, 5, tzinfo=IST))
+        client = PreviousDayFallbackClient()
+
+        candles = load_previous_candle_session(client, 1, plan)
+
+        self.assertEqual(candles, previous_day())
+        self.assertEqual(len(client.day_calls), 2)
+
+    def test_invalid_range_does_not_call_kite(self) -> None:
+        api = CountingHistoricalApi()
+        client = KiteClient.__new__(KiteClient)
+        client._kite = api
+        client.retries = 2
+
+        with self.assertRaises(KiteValidationError):
+            client.historical_candles(1, datetime(2026, 6, 30, 9, 15, tzinfo=IST), datetime(2026, 6, 30, 9, 15, tzinfo=IST), "5minute")
+
+        self.assertEqual(api.calls, 0)
+
+    def test_invalid_range_does_not_retry(self) -> None:
+        api = CountingHistoricalApi()
+        client = KiteClient.__new__(KiteClient)
+        client._kite = api
+        client.retries = 5
+
+        with self.assertRaises(KiteValidationError):
+            client.historical_candles(1, datetime(2026, 6, 30, 9, 20, tzinfo=IST), datetime(2026, 6, 30, 9, 15, tzinfo=IST), "15minute")
+
+        self.assertEqual(api.calls, 0)
+
+    def test_api_range_validation_error_does_not_retry(self) -> None:
+        client = KiteClient.__new__(KiteClient)
+        client.retries = 5
+        attempts = {"count": 0}
+
+        def fail() -> None:
+            attempts["count"] += 1
+            raise RuntimeError("from date cannot be after to date")
+
+        with self.assertRaises(KiteValidationError):
+            client._with_retries("historical candles 5minute", fail)
+
+        self.assertEqual(attempts["count"], 1)
+
     def test_sample_live_mode_separation(self) -> None:
         sample_signals = [signal for _, signal in evaluate_sample_scenarios()]
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from .candle_utils import IST, completed_candles, ensure_ist, latest_completed_candle
 from .indicators import atr, candle_shape, ema, opening_range, previous_day_levels, relative_volume, session_vwap
@@ -46,8 +46,123 @@ class BuiltMarketContext:
     alignment_difference_seconds: float | None = None
 
 
+class HistoricalRangeError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class HistoricalRange:
+    from_dt: datetime
+    to_dt: datetime
+    interval: str
+
+
+@dataclass(frozen=True)
+class HistoricalRangePlan:
+    selected_session: date
+    range_5m: HistoricalRange
+    range_15m: HistoricalRange
+    previous_day_candidates: tuple[date, ...]
+    current_ist_time: datetime
+    timezone: str = "Asia/Kolkata"
+
+
 def _session_candles(candles: list[Candle]) -> list[Candle]:
     return [candle for candle in candles if candle.timestamp.time() >= time(9, 15)]
+
+
+def is_weekday(session_date: date) -> bool:
+    return session_date.weekday() < 5
+
+
+def previous_weekday(session_date: date) -> date:
+    candidate = session_date - timedelta(days=1)
+    while not is_weekday(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def latest_completed_session_candle_end(session_date: date, minutes: int, now: datetime | None = None) -> datetime:
+    local_now = ensure_ist(now) if now is not None else None
+    session_start = datetime.combine(session_date, time(9, 15), tzinfo=IST)
+    session_end = datetime.combine(session_date, time(15, 30), tzinfo=IST)
+    if local_now is None or local_now.date() > session_date or local_now >= session_end:
+        return session_end
+    if local_now <= session_start:
+        return session_start
+    floored = floor_to_session_interval(local_now, minutes)
+    return floored
+
+
+def floor_to_session_interval(timestamp: datetime, minutes: int) -> datetime:
+    local = ensure_ist(timestamp)
+    session_start = datetime.combine(local.date(), time(9, 15), tzinfo=IST)
+    elapsed_minutes = int((local - session_start).total_seconds() // 60)
+    buckets = max(0, elapsed_minutes // minutes)
+    return session_start + timedelta(minutes=buckets * minutes)
+
+
+def validate_historical_range(from_dt: datetime, to_dt: datetime, interval: str) -> tuple[datetime, datetime]:
+    start = ensure_ist(from_dt)
+    end = ensure_ist(to_dt)
+    if start >= end:
+        raise HistoricalRangeError(
+            f"Invalid historical range for {interval}: from_dt {start.isoformat()} must be before to_dt {end.isoformat()}."
+        )
+    return start, end
+
+
+def _range_for_session(session_date: date, minutes: int, now: datetime | None, interval: str) -> HistoricalRange:
+    start = datetime.combine(session_date, time(9, 15), tzinfo=IST)
+    end = latest_completed_session_candle_end(session_date, minutes, now)
+    start, end = validate_historical_range(start, end, interval)
+    return HistoricalRange(start, end, interval)
+
+
+def determine_latest_trading_session(now: datetime) -> date:
+    local_now = ensure_ist(now)
+    today = local_now.date()
+    session_start = datetime.combine(today, time(9, 15), tzinfo=IST)
+    if not is_weekday(today):
+        return previous_weekday(today)
+    if local_now < session_start + timedelta(minutes=5):
+        return previous_weekday(today)
+    return today
+
+
+def historical_range_plan(now: datetime, previous_lookback_days: int = 10) -> HistoricalRangePlan:
+    local_now = ensure_ist(now)
+    selected = determine_latest_trading_session(local_now)
+    previous_selected = previous_weekday(selected)
+    try:
+        range_5m = _range_for_session(selected, 5, local_now if selected == local_now.date() else None, "5minute")
+    except HistoricalRangeError:
+        range_5m = _range_for_session(previous_selected, 5, None, "5minute")
+    try:
+        range_15m = _range_for_session(selected, 15, local_now if selected == local_now.date() else None, "15minute")
+    except HistoricalRangeError:
+        range_15m = _range_for_session(previous_selected, 15, None, "15minute")
+    candidates: list[date] = []
+    candidate = previous_selected
+    attempts = 0
+    while attempts < previous_lookback_days:
+        if is_weekday(candidate):
+            candidates.append(candidate)
+        candidate -= timedelta(days=1)
+        attempts += 1
+    return HistoricalRangePlan(
+        selected_session=selected,
+        range_5m=range_5m,
+        range_15m=range_15m,
+        previous_day_candidates=tuple(candidates),
+        current_ist_time=local_now,
+    )
+
+
+def day_window(session_date: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(session_date, time(9, 15), tzinfo=IST)
+    end = datetime.combine(session_date, time(15, 30), tzinfo=IST)
+    return validate_historical_range(start, end, "day")
 
 
 def _trend_from_15m(candles: list[Candle]) -> Direction | None:

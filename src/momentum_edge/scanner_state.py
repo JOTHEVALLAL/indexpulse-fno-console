@@ -44,6 +44,11 @@ class ScannerDiagnostics:
     last_evaluation: datetime | None
     next_expected_evaluation: datetime | None
     current_error: str | None = None
+    historical_range_from: datetime | None = None
+    historical_range_to: datetime | None = None
+    timezone: str = "Asia/Kolkata"
+    current_ist_time: datetime | None = None
+    selected_trading_session: str | None = None
 
 
 @dataclass

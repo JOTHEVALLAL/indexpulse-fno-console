@@ -6,9 +6,9 @@ from datetime import datetime
 from .candle_utils import ensure_ist, next_expected_evaluation
 from .diagnostics import append_snapshot_diagnostics
 from .instrument_registry import resolve_instrument, resolve_nearest_monthly_future
-from .kite_client import KiteAuthenticationError, KiteClient, KiteDataError
+from .kite_client import KiteAuthenticationError, KiteClient, KiteDataError, KiteValidationError
 from .live_snapshot import DerivedMetrics, LiveInstrumentSnapshot, LiveSnapshot
-from .market_data import RawFuturesData, RawInstrumentData, build_market_context_with_futures, market_day_window, previous_day_window
+from .market_data import HistoricalRangePlan, RawFuturesData, RawInstrumentData, build_market_context_with_futures, day_window, historical_range_plan
 from .rules import Signal, SignalEvaluator, SignalStatus
 from .scanner_state import DataMode, FreshnessState, ScannerCache, ScannerDiagnostics, ScannerState, freshness_state, should_fetch
 
@@ -80,7 +80,28 @@ def unavailable_diagnostics(error: str, now: datetime, cache: ScannerCache | Non
         last_evaluation=getattr(previous, "last_evaluation", None),
         next_expected_evaluation=next_expected_evaluation(now),
         current_error=error,
+        historical_range_from=getattr(previous, "historical_range_from", None),
+        historical_range_to=getattr(previous, "historical_range_to", None),
+        current_ist_time=ensure_ist(now),
+        selected_trading_session=getattr(previous, "selected_trading_session", None),
     )
+
+
+def load_previous_candle_session(client: KiteClient, instrument_token: int, plan: HistoricalRangePlan) -> list:
+    last_error: Exception | None = None
+    for session_date in plan.previous_day_candidates:
+        try:
+            previous_start, previous_end = day_window(session_date)
+            candles = client.historical_candles(instrument_token, previous_start, previous_end, "day")
+        except KiteValidationError:
+            raise
+        except KiteDataError as exc:
+            last_error = exc
+            continue
+        if candles:
+            return candles
+    suffix = f" Last error: {last_error}" if last_error else ""
+    raise KiteDataError(f"No previous trading-day candles found within bounded lookback.{suffix}")
 
 
 def scan_live(
@@ -141,8 +162,7 @@ def scan_live(
         if failures:
             raise KiteDataError("; ".join(error for error in failures if error))
 
-        start, end = market_day_window(local_now)
-        previous_start, previous_end = previous_day_window(local_now)
+        range_plan = historical_range_plan(local_now)
         vix_spec = resolved["INDIA VIX"].instrument
         assert vix_spec is not None
         india_vix_quote = client.quote(vix_spec.exchange, vix_spec.tradingsymbol)
@@ -159,16 +179,16 @@ def scan_live(
             raw = RawInstrumentData(
                 instrument=name,
                 last_price=float(quote.get("last_price") or 0),
-                candles_5m=client.historical_candles(spec.instrument_token, start, end, "5minute"),
-                candles_15m=client.historical_candles(spec.instrument_token, start, end, "15minute"),
-                previous_day_candles=client.historical_candles(spec.instrument_token, previous_start, previous_end, "day"),
+                candles_5m=client.historical_candles(spec.instrument_token, range_plan.range_5m.from_dt, range_plan.range_5m.to_dt, "5minute"),
+                candles_15m=client.historical_candles(spec.instrument_token, range_plan.range_15m.from_dt, range_plan.range_15m.to_dt, "15minute"),
+                previous_day_candles=load_previous_candle_session(client, spec.instrument_token, range_plan),
             )
             raw_futures = RawFuturesData(
                 tradingsymbol=fut_spec.tradingsymbol,
                 instrument_token=fut_spec.instrument_token,
                 expiry=getattr(fut_spec, "expiry", None),
                 last_price=float(futures_quote.get("last_price") or 0),
-                candles_5m=client.historical_candles(fut_spec.instrument_token, start, end, "5minute"),
+                candles_5m=client.historical_candles(fut_spec.instrument_token, range_plan.range_5m.from_dt, range_plan.range_5m.to_dt, "5minute"),
             )
             built_context = build_market_context_with_futures(raw, raw_futures, india_vix, local_now)
             signal = evaluator.evaluate(built_context.context)
@@ -227,6 +247,10 @@ def scan_live(
             last_evaluation=local_now,
             next_expected_evaluation=next_expected_evaluation(local_now),
             current_error=None,
+            historical_range_from=range_plan.range_5m.from_dt,
+            historical_range_to=range_plan.range_5m.to_dt,
+            current_ist_time=local_now,
+            selected_trading_session=range_plan.selected_session.isoformat(),
         )
         snapshot = LiveSnapshot(tuple(built), diagnostics, local_now)
         scanner_cache.last_snapshot = snapshot

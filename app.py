@@ -183,6 +183,12 @@ def render_scanner_status(diagnostics: ScannerDiagnostics | None) -> None:
     detail_columns[2].caption(f"Last 15m candle: {diagnostics.last_completed_15m_candle or '-'}")
     detail_columns[3].caption(f"Last evaluation: {diagnostics.last_evaluation or '-'}")
     detail_columns[4].caption(f"Next expected: {diagnostics.next_expected_evaluation or '-'}")
+    range_columns = st.columns(5)
+    range_columns[0].caption(f"Historical from: {diagnostics.historical_range_from or '-'}")
+    range_columns[1].caption(f"Historical to: {diagnostics.historical_range_to or '-'}")
+    range_columns[2].caption(f"Timezone: {diagnostics.timezone}")
+    range_columns[3].caption(f"Current IST: {diagnostics.current_ist_time or '-'}")
+    range_columns[4].caption(f"Session: {diagnostics.selected_trading_session or '-'}")
     if diagnostics.current_error:
         st.error(diagnostics.current_error)
 

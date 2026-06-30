@@ -18,6 +18,10 @@ class KiteDataError(RuntimeError):
     pass
 
 
+class KiteValidationError(KiteDataError):
+    pass
+
+
 @dataclass(frozen=True)
 class KiteCredentials:
     api_key: str
@@ -60,6 +64,8 @@ class KiteClient:
                 message = str(exc).lower()
                 if "token" in message or "session" in message or "permission" in message:
                     raise KiteAuthenticationError(f"{operation} failed due to authentication: {exc}") from exc
+                if "from date cannot be after to date" in message or "from_dt" in message:
+                    raise KiteValidationError(f"{operation} failed validation: {exc}") from exc
                 if attempt < self.retries:
                     time.sleep(0.25 * (attempt + 1))
         raise KiteDataError(f"{operation} failed after retries: {last_error}") from last_error
@@ -85,9 +91,15 @@ class KiteClient:
         to_date: datetime,
         interval: str,
     ) -> list[Candle]:
+        from_dt = ensure_ist(from_date)
+        to_dt = ensure_ist(to_date)
+        if from_dt >= to_dt:
+            raise KiteValidationError(
+                f"Invalid historical range for {interval}: from_dt {from_dt.isoformat()} must be before to_dt {to_dt.isoformat()}."
+            )
         raw = self._with_retries(
             f"historical candles {interval}",
-            lambda: self._kite.historical_data(instrument_token, from_date, to_date, interval),
+            lambda: self._kite.historical_data(instrument_token, from_dt, to_dt, interval),
         )
         if not raw:
             raise KiteDataError(f"No candles returned for interval {interval}.")
