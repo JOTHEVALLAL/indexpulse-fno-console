@@ -15,6 +15,7 @@ class ScannerState(str, Enum):
     LIVE_READY = "LIVE READY"
     LIVE_CACHED = "LIVE CACHED"
     LIVE_DATA_UNAVAILABLE = "LIVE DATA UNAVAILABLE"
+    CACHED_SESSION = "CACHED SESSION"
     CONFIGURATION_ERROR = "CONFIGURATION ERROR"
     AUTHENTICATION_ERROR = "AUTHENTICATION ERROR"
     DATA_ERROR = "DATA ERROR"
@@ -61,6 +62,12 @@ class ScannerDiagnostics:
     action_block_reason: str | None = None
     latest_futures_candle: datetime | None = None
     current_calendar_date: str | None = None
+    live_fetch_available: bool = True
+    cached_live_snapshot_available: bool = False
+    cached_snapshot_timestamp: datetime | None = None
+    cached_session_date: str | None = None
+    cache_source: str | None = None
+    display_source: str = "LIVE"
 
 
 @dataclass

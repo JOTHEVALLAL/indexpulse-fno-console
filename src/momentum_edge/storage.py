@@ -11,6 +11,7 @@ PERSISTENCE_FILENAMES = (
     "signal_lifecycle.json",
     "signal_outcomes.json",
     "option_recommendations.json",
+    "latest_live_snapshot.json",
     "market_diagnostics.csv",
 )
 

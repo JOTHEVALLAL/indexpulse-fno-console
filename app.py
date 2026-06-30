@@ -14,14 +14,18 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from momentum_edge.alerts import format_telegram_alert, telegram_preview_context
 from momentum_edge.candle_utils import IST
 from momentum_edge.config import kite_configuration_status, load_runtime_config, package_import_status, telegram_configuration_status
+from momentum_edge.dashboard_ui import AUTO_REFRESH_INTERVAL_SECONDS, compact_vwap_source, format_dashboard_timestamp
+from momentum_edge.dashboard_ui import SCANNER_CARD_CLASS, SCANNER_CARD_LABEL_CLASS, SUMMARY_CARD_CLASS, SUMMARY_CARD_LABEL_CLASS, SUMMARY_CARD_TIMESTAMP_CLASS, SUMMARY_CARD_VALUE_CLASS
 from momentum_edge.diagnostics import DEFAULT_DIAGNOSTIC_PATH, load_diagnostic_records
 from momentum_edge.formatting import format_price, signal_detail
 from momentum_edge.history import DEFAULT_HISTORY_PATH, append_alert, clear_alert_history, load_alert_history
 from momentum_edge.kite_client import KiteAuthenticationError, KiteClient
+from momentum_edge.live_cache import DEFAULT_LIVE_CACHE_PATH, cached_snapshot_for_display, load_live_snapshot, save_live_snapshot
 from momentum_edge.lifecycle import (
     DEFAULT_LIFECYCLE_PATH,
     acknowledge_event,
@@ -31,6 +35,7 @@ from momentum_edge.lifecycle import (
     save_lifecycle_state,
 )
 from momentum_edge.live_scanner import scan_live, unavailable_diagnostics
+from momentum_edge.market_session import MarketSessionState, get_market_session_state
 from momentum_edge.outcomes import (
     DEFAULT_OUTCOME_PATH,
     load_outcome_state,
@@ -80,15 +85,11 @@ def initialize_state() -> None:
 
 
 def compact_dt(value: datetime | None) -> str:
-    if value is None:
-        return "-"
-    return value.strftime("%d-%b %H:%M")
+    return format_dashboard_timestamp(value)
 
 
 def compact_source(value: str | None) -> str:
-    if not value:
-        return "-"
-    return value.replace("26", " ").replace(",", ", ")
+    return compact_vwap_source(value)
 
 
 def render_deployment_diagnostics(data_mode: DataMode, diagnostics: ScannerDiagnostics | None = None) -> None:
@@ -146,7 +147,13 @@ def phase_2c_market_validation(data_mode: DataMode, diagnostics: ScannerDiagnost
         checks.append(f"WARN: Latest 5m candle delayed by {int((diagnostics.data_age_seconds or 0) // 60)} minutes")
     if not diagnostics.new_alerts_allowed:
         checks.append(f"FAIL: New alerts blocked because {diagnostics.action_block_reason or 'signals are not actionable'}")
+    candle_age_15m = None
+    if diagnostics.current_ist_time and diagnostics.last_completed_15m_candle:
+        candle_age_15m = (diagnostics.current_ist_time - diagnostics.last_completed_15m_candle).total_seconds()
     return {
+        "last_fetch": diagnostics.last_successful_fetch.isoformat() if diagnostics.last_successful_fetch else None,
+        "last_evaluation": diagnostics.last_evaluation.isoformat() if diagnostics.last_evaluation else None,
+        "next_expected": diagnostics.next_expected_evaluation.isoformat() if diagnostics.next_expected_evaluation else None,
         "current_ist": diagnostics.current_ist_time.isoformat() if diagnostics.current_ist_time else None,
         "timezone": diagnostics.timezone,
         "session_state": diagnostics.session_state,
@@ -158,13 +165,25 @@ def phase_2c_market_validation(data_mode: DataMode, diagnostics: ScannerDiagnost
         "historical_from": diagnostics.historical_range_from.isoformat() if diagnostics.historical_range_from else None,
         "historical_to": diagnostics.historical_range_to.isoformat() if diagnostics.historical_range_to else None,
         "5m_candle_age": diagnostics.data_age_seconds,
+        "15m_candle_age": candle_age_15m,
         "freshness_state": diagnostics.display_freshness,
         "scanner_state": diagnostics.scanner_state.value,
         "signals_actionable": diagnostics.signals_actionable,
         "new_ready_allowed": diagnostics.new_ready_allowed,
         "new_alerts_allowed": diagnostics.new_alerts_allowed,
+        "actionability_block_reason": diagnostics.action_block_reason,
         "underlying_quote_source": "KITE" if data_mode == DataMode.LIVE else "SAMPLE_DATA",
         "futures_vwap_source": diagnostics.vwap_source,
+        "futures_vwap_source_compact": compact_source(diagnostics.vwap_source),
+        "live_credentials_configured": diagnostics.data_mode == DataMode.LIVE and diagnostics.scanner_state != ScannerState.CONFIGURATION_ERROR,
+        "live_fetch_available": diagnostics.live_fetch_available,
+        "cached_live_snapshot_available": diagnostics.cached_live_snapshot_available,
+        "cached_snapshot_timestamp": diagnostics.cached_snapshot_timestamp.isoformat() if diagnostics.cached_snapshot_timestamp else None,
+        "cached_session_date": diagnostics.cached_session_date,
+        "cached_latest_5m_candle": diagnostics.last_completed_5m_candle.isoformat() if diagnostics.cached_live_snapshot_available and diagnostics.last_completed_5m_candle else None,
+        "cached_latest_15m_candle": diagnostics.last_completed_15m_candle.isoformat() if diagnostics.cached_live_snapshot_available and diagnostics.last_completed_15m_candle else None,
+        "cache_source": diagnostics.cache_source,
+        "display_source": diagnostics.display_source,
         "option_mode": "READ_ONLY",
         "order_placement": "DISABLED",
         "checks": checks,
@@ -188,6 +207,31 @@ def record_market_validation(diagnostics: ScannerDiagnostics | None) -> None:
     if records and all(records[0].get(key) == record.get(key) for key in ("timestamp", "session_state", "latest_5m_candle", "freshness_state", "scanner_state", "signals_actionable")):
         return
     st.session_state.market_validation_log = [record, *records][:75]
+
+
+def render_auto_refresh(data_mode: DataMode) -> None:
+    st.sidebar.caption(f"Auto refresh: {AUTO_REFRESH_INTERVAL_SECONDS} seconds")
+    if data_mode != DataMode.LIVE:
+        return
+    components.html(
+        f"""
+        <script>
+        const key = "indexpulseAutoRefreshTimer";
+        if (window[key]) {{
+            clearTimeout(window[key]);
+        }}
+        window[key] = setTimeout(() => {{
+            window.parent.location.reload();
+        }}, {AUTO_REFRESH_INTERVAL_SECONDS * 1000});
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def can_use_cached_live_snapshot(now: datetime) -> bool:
+    return get_market_session_state(now) != MarketSessionState.MARKET_OPEN
 
 
 def reset_sample_session() -> None:
@@ -219,10 +263,31 @@ def render_mode_banner(data_mode: DataMode, diagnostics: ScannerDiagnostics | No
             st.info("MARKET CLOSED - Showing final data from the latest completed session.")
         elif diagnostics.session_state == "NON_TRADING_DAY":
             st.info("NON-TRADING DAY - Showing the latest available market session.")
+    elif diagnostics and diagnostics.scanner_state == ScannerState.CACHED_SESSION:
+        if diagnostics.session_state == "PRE_MARKET":
+            st.info("PRE-MARKET - Showing the latest saved market session.")
+        elif diagnostics.session_state == "NON_TRADING_DAY":
+            st.info("NON-TRADING DAY - Showing the latest saved market session.")
+        else:
+            st.info("MARKET CLOSED - Showing the latest successfully saved market session.")
+        if diagnostics.last_completed_5m_candle:
+            st.caption(f"Live refresh unavailable. Displaying cached session data from {compact_dt(diagnostics.last_completed_5m_candle)}.")
+        if diagnostics.current_error:
+            st.warning(diagnostics.current_error)
     elif diagnostics and diagnostics.scanner_state == ScannerState.LIVE_CACHED:
         st.warning("LIVE CACHED mode. Showing the last valid live snapshot after a fetch failure or rerun cache window. Actions are disabled.")
     else:
-        st.error("LIVE DATA UNAVAILABLE. Authentication or market-data retrieval failed.")
+        if diagnostics and diagnostics.session_state in {"PRE_MARKET", "POST_MARKET", "NON_TRADING_DAY"}:
+            if diagnostics.session_state == "PRE_MARKET":
+                st.info("PRE-MARKET - No saved market session is available.")
+            elif diagnostics.session_state == "NON_TRADING_DAY":
+                st.info("NON-TRADING DAY - No saved market session is available.")
+            else:
+                st.info("MARKET CLOSED - No saved market session is available.")
+            if diagnostics.current_error:
+                st.warning(diagnostics.current_error)
+        else:
+            st.error("LIVE DATA UNAVAILABLE. Authentication or market-data retrieval failed.")
 
 
 def scenario_key(scenario: SampleScenario, signal: Signal) -> str:
@@ -263,29 +328,53 @@ def render_scanner_status(diagnostics: ScannerDiagnostics | None) -> None:
     if diagnostics is None:
         return
     st.subheader("Scanner Status")
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stVerticalBlock"] .indexpulse-status-card {
+            border: 1px solid rgba(120, 120, 120, 0.22);
+            border-radius: 8px;
+            padding: 10px 12px;
+            min-height: 82px;
+            background: rgba(250, 250, 250, 0.02);
+        }
+        div[data-testid="stVerticalBlock"] .indexpulse-status-label {
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.25;
+            opacity: 0.78;
+            margin-bottom: 8px;
+        }
+        div[data-testid="stVerticalBlock"] .indexpulse-status-value {
+            font-size: 24px;
+            font-weight: 650;
+            line-height: 1.15;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     columns = st.columns(6)
-    columns[0].metric("Data Mode", diagnostics.data_mode.value)
-    columns[1].metric("Scanner State", diagnostics.scanner_state.value)
-    columns[2].metric("Session State", (diagnostics.session_state or "-").replace("_", " "))
-    columns[3].metric("Freshness", diagnostics.display_freshness or (diagnostics.data_freshness.value if diagnostics.data_freshness else "-"))
-    columns[4].metric("Latest Candle", compact_dt(diagnostics.last_completed_5m_candle))
-    columns[5].metric("VWAP Source", compact_source(diagnostics.vwap_source))
-
-    detail_columns = st.columns(5)
-    detail_columns[0].caption(f"Last fetch: {diagnostics.last_successful_fetch or '-'}")
-    detail_columns[1].caption(f"Last 5m candle: {diagnostics.last_completed_5m_candle or '-'}")
-    detail_columns[2].caption(f"Last 15m candle: {diagnostics.last_completed_15m_candle or '-'}")
-    detail_columns[3].caption(f"Last evaluation: {diagnostics.last_evaluation or '-'}")
-    detail_columns[4].caption(f"Next expected: {diagnostics.next_expected_evaluation or '-'}")
-    range_columns = st.columns(5)
-    range_columns[0].caption(f"Historical from: {diagnostics.historical_range_from or '-'}")
-    range_columns[1].caption(f"Historical to: {diagnostics.historical_range_to or '-'}")
-    range_columns[2].caption(f"Timezone: {diagnostics.timezone}")
-    range_columns[3].caption(f"Current IST: {diagnostics.current_ist_time or '-'}")
-    range_columns[4].caption(f"Session: {diagnostics.selected_trading_session or '-'}")
-    st.caption(f"Signals actionable: {'Yes' if diagnostics.signals_actionable else 'No'}")
-    if diagnostics.action_block_reason:
-        st.caption(diagnostics.action_block_reason)
+    values = [
+        ("Data Mode", diagnostics.data_mode.value),
+        ("Scanner State", diagnostics.scanner_state.value),
+        ("Session State", (diagnostics.session_state or "-").replace("_", " ")),
+        ("Freshness", diagnostics.display_freshness or (diagnostics.data_freshness.value if diagnostics.data_freshness else "-")),
+        ("Latest Candle", compact_dt(diagnostics.last_completed_5m_candle)),
+        ("VWAP Source", compact_source(diagnostics.vwap_source)),
+    ]
+    for column, (label, value) in zip(columns, values):
+        column.markdown(
+            f"""
+            <div class="indexpulse-status-card" title="{diagnostics.vwap_source if label == 'VWAP Source' else value}">
+                <div class="indexpulse-status-label">{label}</div>
+                <div class="indexpulse-status-value">{value}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     if diagnostics.current_error:
         st.error(diagnostics.current_error)
 
@@ -344,14 +433,55 @@ def render_dashboard(signals: list[Signal], diagnostics: ScannerDiagnostics | No
     prepare_count = sum(signal.signal_status == SignalStatus.PREPARE for signal in signals) if count_actionable else 0
     active_count = len(st.session_state.active_trades)
     latest_signal_time = max((signal.alert_timestamp for signal in signals), default=None)
-    last_refresh = st.session_state.last_refresh_time.isoformat(sep=" ", timespec="seconds")
+    last_refresh = format_dashboard_timestamp(st.session_state.last_refresh_time, include_seconds=True)
 
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stVerticalBlock"] .indexpulse-summary-card {
+            border: 1px solid rgba(120, 120, 120, 0.18);
+            border-radius: 8px;
+            padding: 10px 12px;
+            min-height: 78px;
+        }
+        div[data-testid="stVerticalBlock"] .indexpulse-summary-label {
+            font-size: 15px;
+            font-weight: 650;
+            opacity: 0.8;
+            margin-bottom: 8px;
+        }
+        div[data-testid="stVerticalBlock"] .indexpulse-summary-value {
+            font-size: 26px;
+            font-weight: 650;
+            line-height: 1.15;
+        }
+        div[data-testid="stVerticalBlock"] .indexpulse-summary-value.timestamp {
+            font-size: 22px;
+            white-space: nowrap;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    summary_values = [
+        ("READY", str(ready_count), False),
+        ("PREPARE", str(prepare_count), False),
+        ("Active Trades", str(active_count), False),
+        ("Latest Signal", format_dashboard_timestamp(latest_signal_time), True),
+        ("Last Refresh", last_refresh, True),
+    ]
     columns = st.columns(5)
-    columns[0].metric("READY", ready_count)
-    columns[1].metric("PREPARE", prepare_count)
-    columns[2].metric("Active Trades", active_count)
-    columns[3].metric("Latest Signal", "-" if latest_signal_time is None else latest_signal_time.isoformat(sep=" ", timespec="minutes"))
-    columns[4].metric("Last Refresh", last_refresh)
+    for column, (label, value, is_timestamp) in zip(columns, summary_values):
+        value_class = SUMMARY_CARD_TIMESTAMP_CLASS if is_timestamp else SUMMARY_CARD_VALUE_CLASS
+        column.markdown(
+            f"""
+            <div class="{SUMMARY_CARD_CLASS}">
+                <div class="{SUMMARY_CARD_LABEL_CLASS}">{label}</div>
+                <div class="{value_class}">{value}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.subheader("Signal Overview")
     if not signals:
@@ -899,6 +1029,7 @@ def main() -> None:
     initialize_state()
     st.session_state.last_refresh_time = datetime.now(IST)
     selected_data_mode = DataMode(st.sidebar.radio("Data Mode", [mode.value for mode in DataMode], horizontal=True))
+    render_auto_refresh(selected_data_mode)
 
     diagnostics = None
     live_items = tuple()
@@ -912,8 +1043,11 @@ def main() -> None:
     else:
         runtime_config = load_runtime_config()
         kite_status = kite_configuration_status(runtime_config)
+        live_fetch_error = None
+        kite_client = None
         if not kite_status["configured"]:
             live_snapshot = None
+            live_fetch_error = "Live refresh is unavailable because Zerodha credentials are not configured in this environment."
             diagnostics = unavailable_diagnostics(
                 "LIVE mode unavailable: Kite API key, API secret, and access token must be configured.",
                 st.session_state.last_refresh_time,
@@ -923,9 +1057,17 @@ def main() -> None:
             try:
                 kite_client = KiteClient()
                 live_snapshot = scan_live(kite_client, st.session_state.last_refresh_time, st.session_state.scanner_cache)
+                if live_snapshot.instruments and live_snapshot.diagnostics.scanner_state == ScannerState.LIVE_READY:
+                    safe_save("LIVE snapshot cache", lambda: save_live_snapshot(live_snapshot, DEFAULT_LIVE_CACHE_PATH))
             except KiteAuthenticationError as exc:
                 live_snapshot = None
+                live_fetch_error = f"Live refresh is unavailable because Zerodha authentication failed: {exc}"
                 diagnostics = unavailable_diagnostics(str(exc), st.session_state.last_refresh_time, st.session_state.scanner_cache)
+        if live_snapshot is None and can_use_cached_live_snapshot(st.session_state.last_refresh_time):
+            cached_snapshot = load_live_snapshot(DEFAULT_LIVE_CACHE_PATH)
+            if cached_snapshot is not None:
+                live_snapshot = cached_snapshot_for_display(cached_snapshot, st.session_state.last_refresh_time, live_fetch_error)
+                diagnostics = live_snapshot.diagnostics
         if live_snapshot is not None:
             diagnostics = live_snapshot.diagnostics
             live_items = live_snapshot.instruments
@@ -947,6 +1089,7 @@ def main() -> None:
                 )
                 try:
                     if signals_actionable:
+                        assert kite_client is not None
                         build_option_recommendations(kite_client, live_items, diagnostics, option_state)
                         update_option_recommendations_from_outcomes(kite_client, option_state, outcome_state)
                 except Exception as exc:

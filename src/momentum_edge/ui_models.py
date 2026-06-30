@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from .dashboard_ui import normalize_status_display
 from .formatting import signal_to_table_row
 from .rules import Signal, SignalStatus
 
@@ -52,5 +53,5 @@ def filtered_signals(
 
 def signal_to_display_row(signal: Signal) -> dict[str, str]:
     row = signal_to_table_row(signal)
-    row["Status"] = f"{STATUS_ICON[signal.signal_status]} {signal.signal_status.value}"
+    row["Status"] = normalize_status_display(signal.signal_status.value)
     return row
