@@ -61,7 +61,7 @@ from momentum_edge.watchlist import add_watchlist_entry, watchlist_to_row
 
 
 st.set_page_config(
-    page_title="Momentum Edge F&O Console",
+    page_title="IndexPulse",
     page_icon="ME",
     layout="wide",
 )
@@ -125,7 +125,7 @@ def render_mode_banner(data_mode: DataMode, diagnostics: ScannerDiagnostics | No
         )
         return
     if diagnostics and diagnostics.scanner_state == ScannerState.LIVE_READY:
-        st.success("LIVE mode. Underlying index data is being read for signal evaluation. No option-chain selection or order placement.")
+        st.success("LIVE mode. Underlying index and futures data are active. Option recommendations are read-only. No order placement.")
     elif diagnostics and diagnostics.scanner_state == ScannerState.LIVE_CACHED:
         st.warning("LIVE CACHED mode. Showing the last valid live snapshot after a fetch failure or rerun cache window. Actions are disabled.")
     else:
@@ -870,7 +870,7 @@ def main() -> None:
         if not actions_enabled:
             disabled_reason = "LIVE actions disabled because data is unavailable, cached, stale, or not safely confirmed."
 
-    st.title("Momentum Edge F&O Console")
+    st.title("IndexPulse — NIFTY & BANK NIFTY F&O Signal Console")
     if selected_data_mode != effective_data_mode:
         st.info(f"Selected DATA MODE: {selected_data_mode.value}. Effective DATA MODE: {effective_data_mode.value}.")
     render_mode_banner(effective_data_mode, diagnostics)
