@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from .formatting import format_price, format_ratio
 from .scanner_state import DataMode
-from .rules import Signal, SignalEvaluator
+from .rules import Signal, SignalEvaluator, SignalStatus
+
+
+TELEGRAM_ACTIONABLE_STATUSES = {SignalStatus.READY}
 
 
 def telegram_preview_header(data_mode: DataMode = DataMode.SAMPLE, actionable: bool = False) -> str:
@@ -11,6 +14,21 @@ def telegram_preview_header(data_mode: DataMode = DataMode.SAMPLE, actionable: b
     if actionable:
         return "IndexPulse F&O Console — LIVE DATA"
     return "IndexPulse F&O Console — LIVE PREVIEW"
+
+
+def telegram_preview_context(
+    signal: Signal,
+    data_mode: DataMode,
+    global_signals_actionable: bool,
+    feed_block_reason: str | None = None,
+) -> tuple[bool, str | None]:
+    if data_mode == DataMode.SAMPLE:
+        return True, None
+    if not global_signals_actionable:
+        return False, feed_block_reason or "Blocked: signal is not actionable"
+    if signal.signal_status in TELEGRAM_ACTIONABLE_STATUSES:
+        return True, None
+    return False, f"Blocked: signal status is {signal.signal_status.value}"
 
 
 def format_telegram_alert(

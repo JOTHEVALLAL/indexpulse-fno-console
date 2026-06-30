@@ -1,9 +1,10 @@
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from momentum_edge.alerts import format_telegram_alert
+from momentum_edge.alerts import format_telegram_alert, telegram_preview_context
 import momentum_edge.alerts as alerts_module
 from momentum_edge.history import append_alert, load_alert_history, save_alert_history
 from momentum_edge.rules import (
@@ -165,26 +166,50 @@ class SignalEvaluatorTest(unittest.TestCase):
 
     def test_live_actionable_telegram_preview_uses_live_data_header(self) -> None:
         signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+        actionable, reason = telegram_preview_context(signal, DataMode.LIVE, True)
 
-        preview = format_telegram_alert(signal, data_mode=DataMode.LIVE, actionable=True)
+        preview = format_telegram_alert(signal, data_mode=DataMode.LIVE, actionable=actionable, block_reason=reason)
 
         self.assertIn("IndexPulse F&O Console — LIVE DATA", preview)
         self.assertNotIn("LIVE PREVIEW", preview)
         self.assertNotIn("Reference only", preview)
 
-    def test_live_blocked_telegram_preview_uses_live_preview_header_and_reason(self) -> None:
+    def test_live_delayed_feed_ready_row_uses_feed_block_reason(self) -> None:
         signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+        actionable, reason = telegram_preview_context(signal, DataMode.LIVE, False, "Blocked: live candle feed is delayed")
 
         preview = format_telegram_alert(
             signal,
             data_mode=DataMode.LIVE,
-            actionable=False,
-            block_reason="Blocked: live candle feed is delayed",
+            actionable=actionable,
+            block_reason=reason,
         )
 
         self.assertIn("IndexPulse F&O Console — LIVE PREVIEW", preview)
         self.assertIn("Reference only — not actionable", preview)
         self.assertIn("Blocked: live candle feed is delayed", preview)
+
+    def test_live_fresh_feed_avoid_row_uses_live_preview_and_status_reason(self) -> None:
+        signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+        avoid_signal = replace(signal, signal_status=SignalStatus.AVOID, reason="Current candle movement is unstable.")
+        actionable, reason = telegram_preview_context(avoid_signal, DataMode.LIVE, True)
+
+        preview = format_telegram_alert(avoid_signal, data_mode=DataMode.LIVE, actionable=actionable, block_reason=reason)
+
+        self.assertIn("LIVE PREVIEW", preview)
+        self.assertIn("Reference only", preview)
+        self.assertIn("Blocked: signal status is AVOID", preview)
+
+    def test_live_fresh_feed_wait_row_uses_live_preview_and_status_reason(self) -> None:
+        signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))
+        wait_signal = replace(signal, signal_status=SignalStatus.WAIT, reason="Waiting for confirmation.")
+        actionable, reason = telegram_preview_context(wait_signal, DataMode.LIVE, True)
+
+        preview = format_telegram_alert(wait_signal, data_mode=DataMode.LIVE, actionable=actionable, block_reason=reason)
+
+        self.assertIn("LIVE PREVIEW", preview)
+        self.assertIn("Reference only", preview)
+        self.assertIn("Blocked: signal status is WAIT", preview)
 
     def test_telegram_preview_formatting_does_not_dispatch(self) -> None:
         signal = SignalEvaluator().evaluate(context(candle(9, 35, 24_125, high=24_130, low=24_100)))

@@ -15,7 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 import streamlit as st
 
-from momentum_edge.alerts import format_telegram_alert
+from momentum_edge.alerts import format_telegram_alert, telegram_preview_context
 from momentum_edge.candle_utils import IST
 from momentum_edge.config import kite_configuration_status, load_runtime_config, package_import_status, telegram_configuration_status
 from momentum_edge.diagnostics import DEFAULT_DIAGNOSTIC_PATH, load_diagnostic_records
@@ -435,13 +435,18 @@ def render_intraday_setups(
         render_signal_actions(selected_signal, actions_enabled, disabled_reason)
     with right:
         st.subheader("Telegram Preview")
-        preview_actionable = data_mode == DataMode.SAMPLE or (diagnostics.signals_actionable if diagnostics else False)
+        preview_actionable, preview_block_reason = telegram_preview_context(
+            selected_signal,
+            data_mode,
+            diagnostics.signals_actionable if diagnostics else False,
+            disabled_reason,
+        )
         st.code(
             format_telegram_alert(
                 selected_signal,
                 data_mode=data_mode,
                 actionable=preview_actionable,
-                block_reason=disabled_reason,
+                block_reason=preview_block_reason,
             ),
             language="text",
         )
