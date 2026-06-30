@@ -15,6 +15,9 @@ class ScannerState(str, Enum):
     LIVE_READY = "LIVE READY"
     LIVE_CACHED = "LIVE CACHED"
     LIVE_DATA_UNAVAILABLE = "LIVE DATA UNAVAILABLE"
+    CONFIGURATION_ERROR = "CONFIGURATION ERROR"
+    AUTHENTICATION_ERROR = "AUTHENTICATION ERROR"
+    DATA_ERROR = "DATA ERROR"
 
 
 class FreshnessState(str, Enum):
@@ -49,6 +52,15 @@ class ScannerDiagnostics:
     timezone: str = "Asia/Kolkata"
     current_ist_time: datetime | None = None
     selected_trading_session: str | None = None
+    session_state: str | None = None
+    display_freshness: str | None = None
+    freshness_message: str | None = None
+    signals_actionable: bool = False
+    new_ready_allowed: bool = False
+    new_alerts_allowed: bool = False
+    action_block_reason: str | None = None
+    latest_futures_candle: datetime | None = None
+    current_calendar_date: str | None = None
 
 
 @dataclass

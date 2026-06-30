@@ -205,14 +205,14 @@ python -m unittest discover -s tests
 
 ## GitHub Setup
 
-Use a separate repository, for example `momentum-edge-fno-console`.
+Use a separate repository, for example `indexpulse-fno-console`.
 
 ```bash
 git init
 git branch -M main
 git add .
 git commit -m "Prepare Momentum Edge F&O Console cloud preview"
-git remote add origin https://github.com/<your-user-or-org>/momentum-edge-fno-console.git
+git remote add origin https://github.com/<your-user-or-org>/indexpulse-fno-console.git
 git push -u origin main
 ```
 
@@ -223,7 +223,7 @@ Do not push over the existing Momentum Edge equity repository.
 1. Push this independent repository to GitHub.
 2. Open Streamlit Community Cloud.
 3. Create a new app.
-4. Select repository: `momentum-edge-fno-console`.
+4. Select repository: `indexpulse-fno-console`.
 5. Select branch: `main`.
 6. Select app file: `app.py`.
 7. Select Python `3.11` if prompted.

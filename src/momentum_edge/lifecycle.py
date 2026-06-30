@@ -350,7 +350,10 @@ def process_live_snapshot(
     items: tuple[LiveInstrumentSnapshot, ...],
     data_freshness: FreshnessState | None,
     config: LifecycleConfig | None = None,
+    signals_actionable: bool = True,
 ) -> tuple[list[LifecycleRecord], list[AlertEvent]]:
+    if not signals_actionable:
+        return [], []
     records = []
     events = []
     for item in items:

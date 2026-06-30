@@ -9,11 +9,20 @@ from .instrument_registry import resolve_instrument, resolve_nearest_monthly_fut
 from .kite_client import KiteAuthenticationError, KiteClient, KiteDataError, KiteValidationError
 from .live_snapshot import DerivedMetrics, LiveInstrumentSnapshot, LiveSnapshot
 from .market_data import HistoricalRangePlan, RawFuturesData, RawInstrumentData, build_market_context_with_futures, day_window, historical_range_plan
+from .market_session import MarketFreshnessState, build_session_status
 from .rules import Signal, SignalEvaluator, SignalStatus
-from .scanner_state import DataMode, FreshnessState, ScannerCache, ScannerDiagnostics, ScannerState, freshness_state, should_fetch
+from .scanner_state import DataMode, FreshnessState, ScannerCache, ScannerDiagnostics, ScannerState, should_fetch
 
 
 LIVE_INSTRUMENTS = ("NIFTY 50", "BANK NIFTY")
+
+
+def scanner_freshness(display_freshness: MarketFreshnessState) -> FreshnessState:
+    if display_freshness == MarketFreshnessState.LIVE:
+        return FreshnessState.FRESH
+    if display_freshness == MarketFreshnessState.DELAYED:
+        return FreshnessState.DELAYED
+    return FreshnessState.STALE
 
 
 def block_actionable_signal(signal: Signal, reason: str) -> Signal:
@@ -68,6 +77,7 @@ def block_when_vwap_unavailable(signal: Signal, vwap_available: bool) -> Signal:
 def unavailable_diagnostics(error: str, now: datetime, cache: ScannerCache | None = None) -> ScannerDiagnostics:
     last_snapshot = cache.last_snapshot if cache else None
     previous = getattr(last_snapshot, "diagnostics", None)
+    session_status = build_session_status(now, getattr(previous, "last_completed_5m_candle", None))
     return ScannerDiagnostics(
         data_mode=DataMode.LIVE,
         scanner_state=ScannerState.LIVE_DATA_UNAVAILABLE,
@@ -84,6 +94,15 @@ def unavailable_diagnostics(error: str, now: datetime, cache: ScannerCache | Non
         historical_range_to=getattr(previous, "historical_range_to", None),
         current_ist_time=ensure_ist(now),
         selected_trading_session=getattr(previous, "selected_trading_session", None),
+        session_state=session_status.session_state.value,
+        display_freshness=session_status.freshness_state.value,
+        freshness_message=session_status.message,
+        signals_actionable=False,
+        new_ready_allowed=False,
+        new_alerts_allowed=False,
+        action_block_reason=session_status.block_reason or "Blocked: live data unavailable",
+        latest_futures_candle=getattr(previous, "latest_futures_candle", None),
+        current_calendar_date=session_status.current_calendar_date.isoformat(),
     )
 
 
@@ -126,7 +145,8 @@ def scan_live(
                 )
             latest_5m = max(item.last_completed_5m for item in previous_snapshot.instruments)
             data_age = (local_now - latest_5m).total_seconds()
-            freshness = freshness_state(data_age)
+            session_status = build_session_status(local_now, latest_5m)
+            freshness = scanner_freshness(session_status.freshness_state)
             diagnostics = replace(
                 previous_snapshot.diagnostics,
                 scanner_state=ScannerState.LIVE_CACHED,
@@ -134,6 +154,15 @@ def scan_live(
                 data_age_seconds=data_age,
                 next_expected_evaluation=next_expected_evaluation(local_now),
                 current_error="Using cached LIVE snapshot during Streamlit rerun window.",
+                session_state=session_status.session_state.value,
+                display_freshness=session_status.freshness_state.value,
+                freshness_message=session_status.message,
+                signals_actionable=False,
+                new_ready_allowed=False,
+                new_alerts_allowed=False,
+                action_block_reason="Blocked: cached LIVE snapshot",
+                current_ist_time=local_now,
+                current_calendar_date=session_status.current_calendar_date.isoformat(),
             )
             refreshed_items = tuple(
                 replace(
@@ -192,8 +221,8 @@ def scan_live(
             )
             built_context = build_market_context_with_futures(raw, raw_futures, india_vix, local_now)
             signal = evaluator.evaluate(built_context.context)
-            age_seconds = (local_now - built_context.context.candle.timestamp).total_seconds()
-            freshness = freshness_state(age_seconds)
+            item_session_status = build_session_status(local_now, built_context.context.candle.timestamp)
+            freshness = scanner_freshness(item_session_status.freshness_state)
             signal = block_ready_when_stale(signal, freshness)
             signal = block_when_alignment_invalid(signal, built_context.alignment_status)
             signal = block_when_vwap_unavailable(signal, built_context.futures_vwap is not None and built_context.context.indicators.relative_volume > 0)
@@ -234,15 +263,18 @@ def scan_live(
 
         latest_5m = max(item.last_completed_5m for item in built)
         latest_15m = max(item.last_completed_15m for item in built)
+        latest_futures = max((item.last_completed_5m for item in built if item.metrics.futures_close is not None), default=None)
         data_age = (local_now - latest_5m).total_seconds()
+        session_status = build_session_status(local_now, latest_5m)
+        scanner_data_freshness = scanner_freshness(session_status.freshness_state)
         diagnostics = ScannerDiagnostics(
             data_mode=DataMode.LIVE,
             scanner_state=ScannerState.LIVE_READY,
             last_successful_fetch=local_now,
             last_completed_5m_candle=latest_5m,
             last_completed_15m_candle=latest_15m,
-            data_freshness=freshness_state(data_age),
-            data_age_seconds=data_age,
+            data_freshness=scanner_data_freshness,
+            data_age_seconds=session_status.candle_age_seconds if session_status.candle_age_seconds is not None else data_age,
             vwap_source=", ".join(sorted({item.vwap_source for item in built})),
             last_evaluation=local_now,
             next_expected_evaluation=next_expected_evaluation(local_now),
@@ -251,6 +283,15 @@ def scan_live(
             historical_range_to=range_plan.range_5m.to_dt,
             current_ist_time=local_now,
             selected_trading_session=range_plan.selected_session.isoformat(),
+            session_state=session_status.session_state.value,
+            display_freshness=session_status.freshness_state.value,
+            freshness_message=session_status.message,
+            signals_actionable=session_status.signals_actionable,
+            new_ready_allowed=session_status.new_ready_allowed,
+            new_alerts_allowed=session_status.new_alerts_allowed,
+            action_block_reason=session_status.block_reason,
+            latest_futures_candle=latest_futures,
+            current_calendar_date=session_status.current_calendar_date.isoformat(),
         )
         snapshot = LiveSnapshot(tuple(built), diagnostics, local_now)
         scanner_cache.last_snapshot = snapshot

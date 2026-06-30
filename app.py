@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 import streamlit as st
 
 from momentum_edge.alerts import format_telegram_alert
+from momentum_edge.candle_utils import IST
 from momentum_edge.config import kite_configuration_status, load_runtime_config, package_import_status, telegram_configuration_status
 from momentum_edge.diagnostics import DEFAULT_DIAGNOSTIC_PATH, load_diagnostic_records
 from momentum_edge.formatting import format_price, signal_detail
@@ -51,7 +53,7 @@ from momentum_edge.options import (
 )
 from momentum_edge.performance import breakdown, filter_outcome_records, performance_dashboard_summary
 from momentum_edge.rules import Signal, SignalStatus
-from momentum_edge.scanner_state import DataMode, FreshnessState, ScannerCache, ScannerDiagnostics, ScannerState
+from momentum_edge.scanner_state import DataMode, ScannerCache, ScannerDiagnostics, ScannerState
 from momentum_edge.sample_data import SampleScenario, evaluate_sample_scenarios
 from momentum_edge.storage import PERSISTENCE_MODE, ensure_data_directory, persistence_file_status, runtime_data_dir
 from momentum_edge.trades import TradeStatus, add_active_trade, trade_to_row, update_trade_status
@@ -71,12 +73,25 @@ def initialize_state() -> None:
     st.session_state.setdefault("active_trades", {})
     st.session_state.setdefault("watchlist", {})
     st.session_state.setdefault("selected_signal_key", "")
-    st.session_state.setdefault("last_refresh_time", datetime.now())
+    st.session_state.setdefault("last_refresh_time", datetime.now(IST))
     st.session_state.setdefault("scanner_cache", ScannerCache())
     st.session_state.setdefault("selected_event_key", "")
+    st.session_state.setdefault("market_validation_log", [])
 
 
-def render_deployment_diagnostics(data_mode: DataMode) -> None:
+def compact_dt(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return value.strftime("%d-%b %H:%M")
+
+
+def compact_source(value: str | None) -> str:
+    if not value:
+        return "-"
+    return value.replace("26", " ").replace(",", ", ")
+
+
+def render_deployment_diagnostics(data_mode: DataMode, diagnostics: ScannerDiagnostics | None = None) -> None:
     runtime_config = load_runtime_config()
     data_dir = runtime_data_dir(runtime_config)
     data_status = ensure_data_directory(data_dir)
@@ -88,6 +103,7 @@ def render_deployment_diagnostics(data_mode: DataMode) -> None:
     st.sidebar.caption(f"Persistence: {PERSISTENCE_MODE}")
     st.sidebar.warning("Cloud filesystem persistence is temporary until external storage is configured.")
     with st.sidebar.expander("Deployment Diagnostics"):
+        market_validation = phase_2c_market_validation(data_mode, diagnostics)
         st.write(
             {
                 "application_version": APP_VERSION,
@@ -105,8 +121,73 @@ def render_deployment_diagnostics(data_mode: DataMode) -> None:
                 "persistence_files": persistence_file_status(data_dir),
                 "kite_configuration": kite_status,
                 "telegram_configuration": telegram_status,
+                "phase_2c_market_hours_validation": market_validation,
             }
         )
+        records = st.session_state.get("market_validation_log", [])
+        if records:
+            st.dataframe(records, use_container_width=True, hide_index=True)
+
+
+def phase_2c_market_validation(data_mode: DataMode, diagnostics: ScannerDiagnostics | None) -> dict[str, Any]:
+    if diagnostics is None:
+        return {
+            "option_mode": "READ_ONLY",
+            "order_placement": "DISABLED",
+            "checks": ["Waiting for scanner diagnostics."],
+        }
+    checks = []
+    checks.append("PASS: Current IST is timezone-aware" if diagnostics.current_ist_time and diagnostics.current_ist_time.tzinfo else "WARN: Current IST unavailable")
+    checks.append("PASS: Session state resolved" if diagnostics.session_state else "FAIL: Session state unavailable")
+    checks.append("PASS: Historical range covers the latest required session" if diagnostics.historical_range_from and diagnostics.historical_range_to else "WARN: Historical range unavailable")
+    checks.append("PASS: Futures VWAP source available" if diagnostics.vwap_source and diagnostics.vwap_source != "UNAVAILABLE" else "WARN: Futures VWAP source unavailable")
+    checks.append("PASS: Order placement disabled")
+    if diagnostics.display_freshness == "DELAYED":
+        checks.append(f"WARN: Latest 5m candle delayed by {int((diagnostics.data_age_seconds or 0) // 60)} minutes")
+    if not diagnostics.new_alerts_allowed:
+        checks.append(f"FAIL: New alerts blocked because {diagnostics.action_block_reason or 'signals are not actionable'}")
+    return {
+        "current_ist": diagnostics.current_ist_time.isoformat() if diagnostics.current_ist_time else None,
+        "timezone": diagnostics.timezone,
+        "session_state": diagnostics.session_state,
+        "current_calendar_date": diagnostics.current_calendar_date,
+        "current_session_date": diagnostics.selected_trading_session,
+        "latest_5m_candle": diagnostics.last_completed_5m_candle.isoformat() if diagnostics.last_completed_5m_candle else None,
+        "latest_15m_candle": diagnostics.last_completed_15m_candle.isoformat() if diagnostics.last_completed_15m_candle else None,
+        "latest_futures_candle": diagnostics.latest_futures_candle.isoformat() if diagnostics.latest_futures_candle else None,
+        "historical_from": diagnostics.historical_range_from.isoformat() if diagnostics.historical_range_from else None,
+        "historical_to": diagnostics.historical_range_to.isoformat() if diagnostics.historical_range_to else None,
+        "5m_candle_age": diagnostics.data_age_seconds,
+        "freshness_state": diagnostics.display_freshness,
+        "scanner_state": diagnostics.scanner_state.value,
+        "signals_actionable": diagnostics.signals_actionable,
+        "new_ready_allowed": diagnostics.new_ready_allowed,
+        "new_alerts_allowed": diagnostics.new_alerts_allowed,
+        "underlying_quote_source": "KITE" if data_mode == DataMode.LIVE else "SAMPLE_DATA",
+        "futures_vwap_source": diagnostics.vwap_source,
+        "option_mode": "READ_ONLY",
+        "order_placement": "DISABLED",
+        "checks": checks,
+    }
+
+
+def record_market_validation(diagnostics: ScannerDiagnostics | None) -> None:
+    if diagnostics is None:
+        return
+    record = {
+        "timestamp": diagnostics.current_ist_time.isoformat() if diagnostics.current_ist_time else datetime.now().isoformat(),
+        "session_state": diagnostics.session_state,
+        "latest_5m_candle": diagnostics.last_completed_5m_candle.isoformat() if diagnostics.last_completed_5m_candle else None,
+        "latest_15m_candle": diagnostics.last_completed_15m_candle.isoformat() if diagnostics.last_completed_15m_candle else None,
+        "freshness_state": diagnostics.display_freshness,
+        "scanner_state": diagnostics.scanner_state.value,
+        "signals_actionable": diagnostics.signals_actionable,
+        "message": diagnostics.freshness_message or diagnostics.current_error or "",
+    }
+    records = st.session_state.market_validation_log
+    if records and all(records[0].get(key) == record.get(key) for key in ("timestamp", "session_state", "latest_5m_candle", "freshness_state", "scanner_state", "signals_actionable")):
+        return
+    st.session_state.market_validation_log = [record, *records][:75]
 
 
 def reset_sample_session() -> None:
@@ -126,6 +207,18 @@ def render_mode_banner(data_mode: DataMode, diagnostics: ScannerDiagnostics | No
         return
     if diagnostics and diagnostics.scanner_state == ScannerState.LIVE_READY:
         st.success("LIVE mode. Underlying index and futures data are active. Option recommendations are read-only. No order placement.")
+        if diagnostics.session_state == "PRE_MARKET":
+            st.info("PRE-MARKET - Showing the previous trading session. Live 5-minute and 15-minute candle updates will begin after 09:15 IST.")
+        elif diagnostics.session_state == "MARKET_OPEN" and diagnostics.display_freshness == "LIVE":
+            st.success("MARKET OPEN - Live index and futures data are updating normally.")
+        elif diagnostics.session_state == "MARKET_OPEN" and diagnostics.display_freshness == "DELAYED":
+            st.warning("MARKET OPEN - Data updates are delayed. Review the last candle time before using any signal.")
+        elif diagnostics.session_state == "MARKET_OPEN":
+            st.error("MARKET OPEN - Live data is stale or unavailable. Signals must not be treated as actionable until fresh candles resume.")
+        elif diagnostics.session_state == "POST_MARKET":
+            st.info("MARKET CLOSED - Showing final data from the latest completed session.")
+        elif diagnostics.session_state == "NON_TRADING_DAY":
+            st.info("NON-TRADING DAY - Showing the latest available market session.")
     elif diagnostics and diagnostics.scanner_state == ScannerState.LIVE_CACHED:
         st.warning("LIVE CACHED mode. Showing the last valid live snapshot after a fetch failure or rerun cache window. Actions are disabled.")
     else:
@@ -170,12 +263,13 @@ def render_scanner_status(diagnostics: ScannerDiagnostics | None) -> None:
     if diagnostics is None:
         return
     st.subheader("Scanner Status")
-    columns = st.columns(5)
+    columns = st.columns(6)
     columns[0].metric("Data Mode", diagnostics.data_mode.value)
     columns[1].metric("Scanner State", diagnostics.scanner_state.value)
-    columns[2].metric("Freshness", diagnostics.data_freshness.value if diagnostics.data_freshness else "-")
-    columns[3].metric("Data Age", "-" if diagnostics.data_age_seconds is None else f"{diagnostics.data_age_seconds:.0f}s")
-    columns[4].metric("VWAP Source", diagnostics.vwap_source)
+    columns[2].metric("Session State", (diagnostics.session_state or "-").replace("_", " "))
+    columns[3].metric("Freshness", diagnostics.display_freshness or (diagnostics.data_freshness.value if diagnostics.data_freshness else "-"))
+    columns[4].metric("Latest Candle", compact_dt(diagnostics.last_completed_5m_candle))
+    columns[5].metric("VWAP Source", compact_source(diagnostics.vwap_source))
 
     detail_columns = st.columns(5)
     detail_columns[0].caption(f"Last fetch: {diagnostics.last_successful_fetch or '-'}")
@@ -189,6 +283,9 @@ def render_scanner_status(diagnostics: ScannerDiagnostics | None) -> None:
     range_columns[2].caption(f"Timezone: {diagnostics.timezone}")
     range_columns[3].caption(f"Current IST: {diagnostics.current_ist_time or '-'}")
     range_columns[4].caption(f"Session: {diagnostics.selected_trading_session or '-'}")
+    st.caption(f"Signals actionable: {'Yes' if diagnostics.signals_actionable else 'No'}")
+    if diagnostics.action_block_reason:
+        st.caption(diagnostics.action_block_reason)
     if diagnostics.current_error:
         st.error(diagnostics.current_error)
 
@@ -201,7 +298,9 @@ def lifecycle_by_instrument(lifecycle_state: Any, data_mode: DataMode) -> dict[s
     return {record["instrument"]: record for record in lifecycle_rows(lifecycle_state, data_mode)}
 
 
-def signal_age(record: dict[str, Any]) -> str:
+def signal_age(record: dict[str, Any], diagnostics: ScannerDiagnostics | None = None, data_mode: DataMode | None = None) -> str:
+    if data_mode == DataMode.LIVE and diagnostics and not diagnostics.signals_actionable:
+        return "Previous session"
     first = record.get("first_detected_time")
     last = record.get("last_evaluated_time")
     if not first or not last:
@@ -213,15 +312,22 @@ def signal_age(record: dict[str, Any]) -> str:
     return f"{minutes}m"
 
 
-def signal_display_rows_with_lifecycle(signals: list[Signal], lifecycle_state: Any, data_mode: DataMode) -> list[dict[str, Any]]:
+def signal_display_rows_with_lifecycle(
+    signals: list[Signal],
+    lifecycle_state: Any,
+    data_mode: DataMode,
+    diagnostics: ScannerDiagnostics | None = None,
+) -> list[dict[str, Any]]:
     lifecycle_map = lifecycle_by_instrument(lifecycle_state, data_mode)
+    actionable = data_mode == DataMode.SAMPLE or (diagnostics.signals_actionable if diagnostics else False)
     rows = []
     for signal in signals:
         row = signal_to_display_row(signal)
         record = lifecycle_map.get(signal.instrument, {})
-        row["Lifecycle Status"] = record.get("current_status", "-")
+        row["Lifecycle Status"] = "SESSION CLOSED" if data_mode == DataMode.LIVE and diagnostics and not diagnostics.signals_actionable else record.get("current_status", "-")
         row["Previous Status"] = record.get("previous_status") or "-"
-        row["Signal Age"] = signal_age(record) if record else "-"
+        row["Signal Age"] = signal_age(record, diagnostics, data_mode) if record or (data_mode == DataMode.LIVE and diagnostics and not diagnostics.signals_actionable) else "-"
+        row["Actionable"] = "Yes" if actionable and signal.signal_status in {SignalStatus.READY, SignalStatus.PREPARE} else "No"
         row["Candles In PREPARE"] = record.get("candles_in_prepare", "-")
         row["Last Transition"] = record.get("status_changed_time", "-")
         row["Last Evaluated Candle"] = record.get("trigger_candle_timestamp", "-")
@@ -233,8 +339,9 @@ def signal_display_rows_with_lifecycle(signals: list[Signal], lifecycle_state: A
 
 def render_dashboard(signals: list[Signal], diagnostics: ScannerDiagnostics | None, lifecycle_state: Any, data_mode: DataMode) -> None:
     render_scanner_status(diagnostics)
-    ready_count = sum(signal.signal_status == SignalStatus.READY for signal in signals)
-    prepare_count = sum(signal.signal_status == SignalStatus.PREPARE for signal in signals)
+    count_actionable = data_mode == DataMode.SAMPLE or (diagnostics.signals_actionable if diagnostics else False)
+    ready_count = sum(signal.signal_status == SignalStatus.READY for signal in signals) if count_actionable else 0
+    prepare_count = sum(signal.signal_status == SignalStatus.PREPARE for signal in signals) if count_actionable else 0
     active_count = len(st.session_state.active_trades)
     latest_signal_time = max((signal.alert_timestamp for signal in signals), default=None)
     last_refresh = st.session_state.last_refresh_time.isoformat(sep=" ", timespec="seconds")
@@ -250,7 +357,7 @@ def render_dashboard(signals: list[Signal], diagnostics: ScannerDiagnostics | No
     if not signals:
         st.info("No signals available for the selected data mode.")
     else:
-        st.dataframe(signal_display_rows_with_lifecycle(signals, lifecycle_state, data_mode), use_container_width=True, hide_index=True)
+        st.dataframe(signal_display_rows_with_lifecycle(signals, lifecycle_state, data_mode, diagnostics), use_container_width=True, hide_index=True)
 
 
 def render_signal_actions(signal: Signal, actions_enabled: bool, disabled_reason: str | None = None) -> None:
@@ -284,6 +391,7 @@ def render_intraday_setups(
     actions_enabled: bool,
     lifecycle_state: Any,
     data_mode: DataMode,
+    diagnostics: ScannerDiagnostics | None = None,
     disabled_reason: str | None = None,
 ) -> None:
     st.subheader("Intraday Setups")
@@ -303,7 +411,7 @@ def render_intraday_setups(
     selected_setups = set(filter_columns[2].multiselect("Setup", setups, default=setups))
 
     filtered = filtered_signals(all_signals, selected_instruments, selected_statuses, selected_setups)
-    st.dataframe(signal_display_rows_with_lifecycle(filtered, lifecycle_state, data_mode), use_container_width=True, hide_index=True)
+    st.dataframe(signal_display_rows_with_lifecycle(filtered, lifecycle_state, data_mode, diagnostics), use_container_width=True, hide_index=True)
 
     selectable = [
         key
@@ -630,7 +738,7 @@ def render_option_selection(option_state: Any, lifecycle_state: Any) -> None:
 
 
 def build_option_recommendations(client: KiteClient, live_items: tuple[Any, ...], diagnostics: ScannerDiagnostics | None, option_state: Any) -> None:
-    if diagnostics is None or diagnostics.scanner_state != ScannerState.LIVE_READY or diagnostics.data_freshness == FreshnessState.STALE:
+    if diagnostics is None or diagnostics.scanner_state != ScannerState.LIVE_READY or not diagnostics.signals_actionable:
         return
     nfo_instruments = client.instruments("NFO")
     now = st.session_state.last_refresh_time
@@ -775,9 +883,8 @@ def sample_scenarios_with_diagnostics(now: datetime, error: str | None = None) -
 
 def main() -> None:
     initialize_state()
-    st.session_state.last_refresh_time = datetime.now()
+    st.session_state.last_refresh_time = datetime.now(IST)
     selected_data_mode = DataMode(st.sidebar.radio("Data Mode", [mode.value for mode in DataMode], horizontal=True))
-    render_deployment_diagnostics(selected_data_mode)
 
     diagnostics = None
     live_items = tuple()
@@ -809,11 +916,14 @@ def main() -> None:
             diagnostics = live_snapshot.diagnostics
             live_items = live_snapshot.instruments
             if live_items:
-                process_live_snapshot(lifecycle_state, live_items, diagnostics.data_freshness)
-                process_ready_signals(outcome_state, [item.signal for item in live_items], selected_data_mode)
+                signals_actionable = diagnostics.signals_actionable
+                if signals_actionable:
+                    process_live_snapshot(lifecycle_state, live_items, diagnostics.data_freshness, signals_actionable=signals_actionable)
+                    process_ready_signals(outcome_state, [item.signal for item in live_items], selected_data_mode, signals_actionable=signals_actionable)
                 data_safe = (
+                    signals_actionable
+                    and
                     diagnostics.scanner_state == ScannerState.LIVE_READY
-                    and diagnostics.data_freshness != FreshnessState.STALE
                     and all(item.metrics.candle_alignment_status == "ALIGNED" and not item.is_cached for item in live_items)
                 )
                 process_outcomes_for_candles(
@@ -822,21 +932,13 @@ def main() -> None:
                     data_safe=data_safe,
                 )
                 try:
-                    build_option_recommendations(kite_client, live_items, diagnostics, option_state)
-                    update_option_recommendations_from_outcomes(kite_client, option_state, outcome_state)
+                    if signals_actionable:
+                        build_option_recommendations(kite_client, live_items, diagnostics, option_state)
+                        update_option_recommendations_from_outcomes(kite_client, option_state, outcome_state)
                 except Exception as exc:
                     if diagnostics:
-                        diagnostics = ScannerDiagnostics(
-                            data_mode=diagnostics.data_mode,
-                            scanner_state=diagnostics.scanner_state,
-                            last_successful_fetch=diagnostics.last_successful_fetch,
-                            last_completed_5m_candle=diagnostics.last_completed_5m_candle,
-                            last_completed_15m_candle=diagnostics.last_completed_15m_candle,
-                            data_freshness=diagnostics.data_freshness,
-                            data_age_seconds=diagnostics.data_age_seconds,
-                            vwap_source=diagnostics.vwap_source,
-                            last_evaluation=diagnostics.last_evaluation,
-                            next_expected_evaluation=diagnostics.next_expected_evaluation,
+                        diagnostics = replace(
+                            diagnostics,
                             current_error=f"{diagnostics.current_error or ''} Option recommendation unavailable: {exc}".strip(),
                         )
             scenarios_and_signals = [
@@ -863,16 +965,18 @@ def main() -> None:
         actions_enabled = (
             diagnostics is not None
             and diagnostics.scanner_state == ScannerState.LIVE_READY
-            and diagnostics.data_freshness != FreshnessState.STALE
+            and diagnostics.signals_actionable
             and all(item.metrics.candle_alignment_status == "ALIGNED" for item in live_items)
             and not any(item.is_cached for item in live_items)
         )
         if not actions_enabled:
-            disabled_reason = "LIVE actions disabled because data is unavailable, cached, stale, or not safely confirmed."
+            disabled_reason = diagnostics.action_block_reason if diagnostics else "LIVE actions disabled because scanner diagnostics are unavailable."
 
     st.title("IndexPulse — NIFTY & BANK NIFTY F&O Signal Console")
     if selected_data_mode != effective_data_mode:
         st.info(f"Selected DATA MODE: {selected_data_mode.value}. Effective DATA MODE: {effective_data_mode.value}.")
+    record_market_validation(diagnostics if selected_data_mode == DataMode.LIVE else None)
+    render_deployment_diagnostics(selected_data_mode, diagnostics)
     render_mode_banner(effective_data_mode, diagnostics)
     render_controls()
 
@@ -883,7 +987,7 @@ def main() -> None:
     with dashboard_tab:
         render_dashboard(signals, diagnostics, lifecycle_state, selected_data_mode)
     with setups_tab:
-        render_intraday_setups(scenarios_and_signals, actions_enabled, lifecycle_state, selected_data_mode, disabled_reason)
+        render_intraday_setups(scenarios_and_signals, actions_enabled, lifecycle_state, selected_data_mode, diagnostics, disabled_reason)
     with trades_tab:
         render_active_trades()
     with history_tab:

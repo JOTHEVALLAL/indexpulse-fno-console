@@ -369,7 +369,9 @@ def upsert_execution_record(state: OutcomeState, record: ExecutionRecord) -> Non
     state.records = [asdict(item) for item in records.values()]
 
 
-def process_ready_signals(state: OutcomeState, signals: list[Signal], data_mode: DataMode) -> None:
+def process_ready_signals(state: OutcomeState, signals: list[Signal], data_mode: DataMode, signals_actionable: bool = True) -> None:
+    if not signals_actionable:
+        return
     for signal in signals:
         if signal.signal_status == SignalStatus.READY:
             ensure_execution_record(state, signal, data_mode)
